@@ -13,11 +13,12 @@ from switchbot_mqtt_gateway.utils import json_default, log
 
 class MqttClient:
     def __init__(
-        self, settings: Settings, loop: asyncio.AbstractEventLoop, on_reload: Any
+        self, settings: Settings, loop: asyncio.AbstractEventLoop, on_reload: Any, on_command: Any
     ) -> None:
         self.settings = settings
         self.loop = loop
         self.on_reload = on_reload
+        self.on_command = on_command
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=settings.mqtt_client_id)
         self.client.username_pw_set(settings.mqtt_username, settings.mqtt_password)
         self.client.will_set(
@@ -57,8 +58,15 @@ class MqttClient:
     def _on_connect(self, client: mqtt.Client, _userdata: Any, _flags: Any, rc: Any, _props: Any) -> None:
         log("mqtt_connected", reason_code=str(rc))
         client.subscribe(f"{self.settings.topic_prefix}/gateway/commands/reload")
+        client.subscribe(f"{self.settings.topic_prefix}/devices/+/commands")
 
     def _on_message(self, _client: mqtt.Client, _userdata: Any, message: mqtt.MQTTMessage) -> None:
         if message.topic.endswith("/gateway/commands/reload"):
             payload = json.loads(message.payload.decode() or "{}")
             asyncio.run_coroutine_threadsafe(self.on_reload(payload), self.loop)
+            return
+        prefix = f"{self.settings.topic_prefix}/devices/"
+        if message.topic.startswith(prefix) and message.topic.endswith("/commands"):
+            payload = json.loads(message.payload.decode() or "{}")
+            device_id = message.topic.removeprefix(prefix).removesuffix("/commands")
+            asyncio.run_coroutine_threadsafe(self.on_command(device_id, payload), self.loop)

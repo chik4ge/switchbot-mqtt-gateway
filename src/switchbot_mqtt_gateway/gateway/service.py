@@ -16,6 +16,7 @@ from switchbot_mqtt_gateway.home_assistant import (
     discovery_topics_for_device,
 )
 from switchbot_mqtt_gateway.switchbot.ble import parse_switchbot_advertisement
+from switchbot_mqtt_gateway.switchbot.commands import build_device, execute_command
 from switchbot_mqtt_gateway.switchbot.normalize import build_normalized_state
 from switchbot_mqtt_gateway.mqtt.client import MqttClient
 from switchbot_mqtt_gateway.settings import Settings
@@ -29,12 +30,14 @@ class Gateway:
         self.api = api or SwitchBotOpenApi(settings)
         self.inventory: dict[str, dict[str, Any]] = {}
         self.seen: dict[str, float] = {}
+        self.ble_addresses: dict[str, str] = {}
         self.ble_devices: set[str] = set()
+        self.command_results: dict[str, dict[str, Any]] = {}
         self.mqtt: MqttClient | None = None
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        self.mqtt = MqttClient(self.settings, loop, self.reload)
+        self.mqtt = MqttClient(self.settings, loop, self.reload, self.handle_command)
         self.mqtt.connect()
         self.publish_gateway_status()
         await self.refresh_inventory()
@@ -69,6 +72,38 @@ class Gateway:
                 "completed_at": utc_now(),
             },
         )
+
+    async def handle_command(self, device_id: str, payload: Mapping[str, Any]) -> None:
+        request_id = str(payload.get("request_id") or "")
+        if request_id and request_id in self.command_results:
+            self.mqtt_publish(f"devices/{device_id}/events/command_result", self.command_results[request_id])
+            return
+
+        result = await self.execute_device_command(device_id, payload)
+        if request_id:
+            self.command_results[request_id] = result
+        self.mqtt_publish(f"devices/{device_id}/events/command_result", result)
+
+    async def execute_device_command(self, device_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action") or "")
+        result: dict[str, Any] = {
+            "request_id": payload.get("request_id"),
+            "action": action,
+            "completed_at": utc_now(),
+        }
+        if device_id not in self.inventory:
+            return {**result, "status": "failed", "error": "device_not_found"}
+        if device_id not in self.ble_addresses:
+            return {**result, "status": "failed", "error": "device_not_seen"}
+
+        device_info = self.inventory[device_id]
+        device_type = str(device_info.get("deviceType") or "")
+        try:
+            device = build_device(device_type, self.ble_addresses[device_id], device_info.get("deviceName"))
+            ok = await execute_command(device, payload)
+        except Exception as exc:
+            return {**result, "status": "failed", "error": str(exc)}
+        return {**result, "status": "succeeded" if ok is not False else "failed"}
 
     async def periodic_inventory_refresh(self) -> None:
         while True:
@@ -184,6 +219,9 @@ class Gateway:
     def publish_ble_state(self, device_id: str, parsed: Mapping[str, Any], device: BLEDevice | None) -> None:
         is_new_ble_device = device_id not in self.ble_devices
         self.ble_devices.add(device_id)
+        address = parsed.get("address")
+        if isinstance(address, str):
+            self.ble_addresses[device_id] = address
         self.seen[device_id] = time.monotonic()
         if is_new_ble_device:
             self.publish_inventory()

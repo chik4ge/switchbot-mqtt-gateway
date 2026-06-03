@@ -69,3 +69,27 @@ docker compose --profile debug up mqtt-debug-cli
 ```
 
 The Compose setup starts a local Mosquitto broker on `127.0.0.1:1883` and a WebSocket listener on `127.0.0.1:9001`.
+
+## Commands
+
+Device commands are received on:
+
+```text
+switchbot/devices/{deviceId}/commands
+```
+
+Examples:
+
+```json
+{"request_id":"debug-on","action":"set_power","value":"on"}
+```
+
+```json
+{"request_id":"debug-brightness","action":"set_brightness","value":50}
+```
+
+Results are published to:
+
+```text
+switchbot/devices/{deviceId}/events/command_result
+```

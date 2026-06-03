@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from switchbot_mqtt_gateway.gateway import Gateway
+import switchbot_mqtt_gateway.gateway.service as gateway_service
 from switchbot_mqtt_gateway.switchbot.normalize import build_normalized_state
 
 
@@ -194,3 +195,103 @@ def test_build_normalized_state_maps_common_fields() -> None:
         "sequence_number": 7,
         "rssi_dbm": -55,
     }
+
+
+def test_handle_command_executes_seen_device_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    gateway, mqtt = gateway_with_inventory(
+        {
+            "AABBCCDDEEFF": {
+                "deviceId": "AABBCCDDEEFF",
+                "deviceName": "Light strip",
+                "deviceType": "Strip Light",
+                "enableCloudService": True,
+            }
+        }
+    )
+    gateway.inventory = gateway.api.devices  # type: ignore[attr-defined]
+    gateway.ble_addresses["AABBCCDDEEFF"] = "AA:BB:CC:DD:EE:FF"
+
+    class FakeDevice:
+        pass
+
+    async def fake_execute(device: object, payload: dict[str, Any]) -> bool:
+        assert isinstance(device, FakeDevice)
+        assert payload["action"] == "set_power"
+        return True
+
+    monkeypatch.setattr(gateway_service, "build_device", lambda *_args: FakeDevice())
+    monkeypatch.setattr(gateway_service, "execute_command", fake_execute)
+
+    asyncio.run(
+        gateway.handle_command(
+            "AABBCCDDEEFF",
+            {"request_id": "request-1", "action": "set_power", "value": "on"},
+        )
+    )
+
+    topic, payload, retain = mqtt.published[-1]
+    assert topic == "devices/AABBCCDDEEFF/events/command_result"
+    assert retain is False
+    assert payload["request_id"] == "request-1"
+    assert payload["action"] == "set_power"
+    assert payload["status"] == "succeeded"
+
+
+def test_handle_command_republishes_duplicate_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    gateway, mqtt = gateway_with_inventory(
+        {
+            "AABBCCDDEEFF": {
+                "deviceId": "AABBCCDDEEFF",
+                "deviceName": "Light strip",
+                "deviceType": "Strip Light",
+                "enableCloudService": True,
+            }
+        }
+    )
+    gateway.inventory = gateway.api.devices  # type: ignore[attr-defined]
+    gateway.ble_addresses["AABBCCDDEEFF"] = "AA:BB:CC:DD:EE:FF"
+    calls = 0
+
+    class FakeDevice:
+        pass
+
+    async def fake_execute(_device: object, _payload: dict[str, Any]) -> bool:
+        nonlocal calls
+        calls += 1
+        return True
+
+    monkeypatch.setattr(gateway_service, "build_device", lambda *_args: FakeDevice())
+    monkeypatch.setattr(gateway_service, "execute_command", fake_execute)
+
+    command = {"request_id": "request-1", "action": "set_power", "value": "on"}
+    asyncio.run(gateway.handle_command("AABBCCDDEEFF", command))
+    asyncio.run(gateway.handle_command("AABBCCDDEEFF", command))
+
+    assert calls == 1
+    assert len(
+        [
+            topic
+            for topic, _, _ in mqtt.published
+            if topic == "devices/AABBCCDDEEFF/events/command_result"
+        ]
+    ) == 2
+
+
+def test_command_fails_for_unseen_device() -> None:
+    gateway, _ = gateway_with_inventory(
+        {
+            "AABBCCDDEEFF": {
+                "deviceId": "AABBCCDDEEFF",
+                "deviceName": "Light strip",
+                "deviceType": "Strip Light",
+            }
+        }
+    )
+    gateway.inventory = gateway.api.devices  # type: ignore[attr-defined]
+
+    result = asyncio.run(
+        gateway.execute_device_command("AABBCCDDEEFF", {"request_id": "r1", "action": "turn_on"})
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"] == "device_not_seen"
