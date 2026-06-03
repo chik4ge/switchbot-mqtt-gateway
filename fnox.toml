@@ -1,0 +1,16 @@
+[providers.op]
+type = "1password"
+vault = "homelab"
+
+[providers.local]
+type = "age"
+recipients = ["age16d0xzhr4qk7wgva9vknqnalgnv444andqanu8mwqamzhk7hscdjsnftn5e"]
+
+[secrets]
+SWITCHBOT_API_TOKEN= { provider = "op", value = "switchbot-token/token" }
+SWITCHBOT_API_SECRET= { provider = "op", value = "switchbot-token/secret" }
+MQTT_HOST= { default = "127.0.0.1" }
+MQTT_PORT= { default = "1883" }
+MQTT_CLIENT_ID= { default = "switchbot-mqtt-gateway-dev" }
+MQTT_TOPIC_PREFIX= { default = "switchbot" }
+LOG_LEVEL= { default = "debug" }

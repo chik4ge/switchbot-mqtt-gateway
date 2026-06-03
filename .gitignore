@@ -1,0 +1,4 @@
+fnox.local.toml
+.env
+__pycache__/
+*.pyc

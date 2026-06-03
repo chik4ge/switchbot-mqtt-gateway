@@ -1,0 +1,47 @@
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    command: mosquitto -c /mosquitto/config/mosquitto.conf
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  mqtt-debug-web:
+    image: nginx:1.27-alpine
+    depends_on:
+      - mqtt
+    ports:
+      - "8080:80"
+    volumes:
+      - ./docker/mqtt-debug-web:/usr/share/nginx/html:ro
+
+  gateway:
+    build: .
+    network_mode: host
+    depends_on:
+      - mqtt
+    environment:
+      SWITCHBOT_API_TOKEN: ${SWITCHBOT_API_TOKEN}
+      SWITCHBOT_API_SECRET: ${SWITCHBOT_API_SECRET}
+      MQTT_HOST: 127.0.0.1
+      MQTT_PORT: "1883"
+      MQTT_CLIENT_ID: switchbot-mqtt-gateway-compose
+      MQTT_TOPIC_PREFIX: switchbot
+      LOG_LEVEL: debug
+    volumes:
+      - /var/run/dbus:/var/run/dbus
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - apparmor:unconfined
+
+  mqtt-debug-cli:
+    image: eclipse-mosquitto:2
+    depends_on:
+      - mqtt
+    command: mosquitto_sub -h mqtt -p 1883 -t '#' -v
+    profiles:
+      - debug
