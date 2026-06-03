@@ -11,6 +11,10 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
 from switchbot_mqtt_gateway import __version__
+from switchbot_mqtt_gateway.home_assistant import (
+    build_discovery_configs,
+    discovery_topics_for_device,
+)
 from switchbot_mqtt_gateway.switchbot.ble import parse_switchbot_advertisement
 from switchbot_mqtt_gateway.mqtt.client import MqttClient
 from switchbot_mqtt_gateway.settings import Settings
@@ -84,17 +88,21 @@ class Gateway:
 
     async def refresh_inventory(self) -> None:
         devices = await self.api.fetch_devices()
-        removed = self.inventory.keys() - devices.keys()
+        before = self.inventory
+        removed = before.keys() - devices.keys()
         self.inventory = devices
         self.publish_inventory()
         for device_id, device in devices.items():
             if device_id in self.ble_devices:
                 self.publish_device_info(device_id, device)
+                self.publish_home_assistant_discovery(device_id, device)
             else:
                 self.clear_retained_device_topics(device_id)
+                self.clear_home_assistant_discovery(device_id, device)
         for device_id in removed & self.ble_devices:
             self.mqtt_publish(f"devices/{device_id}/availability", "offline", retain=True)
             self.clear_retained_device_topics(device_id)
+            self.clear_home_assistant_discovery(device_id, before[device_id])
         log("inventory_refreshed", devices_total=len(devices), devices_removed=len(removed))
 
     def publish_gateway_status(self) -> None:
@@ -149,6 +157,19 @@ class Gateway:
         self.mqtt_publish(f"devices/{device_id}/info", None, retain=True)
         self.mqtt_publish(f"devices/{device_id}/availability", None, retain=True)
 
+    def publish_home_assistant_discovery(self, device_id: str, device: Mapping[str, Any]) -> None:
+        for topic, payload in build_discovery_configs(
+            self.settings.topic_prefix,
+            self.settings.discovery_prefix,
+            device_id,
+            device,
+        ):
+            self.mqtt_publish_absolute(topic, payload, retain=True)
+
+    def clear_home_assistant_discovery(self, device_id: str, device: Mapping[str, Any]) -> None:
+        for topic in discovery_topics_for_device(self.settings.discovery_prefix, device_id, device):
+            self.mqtt_publish_absolute(topic, None, retain=True)
+
     def on_advertisement(self, device: BLEDevice, advertisement: AdvertisementData) -> None:
         parsed = parse_switchbot_advertisement(device, advertisement)
         if not parsed:
@@ -166,6 +187,7 @@ class Gateway:
         if is_new_ble_device:
             self.publish_inventory()
             self.publish_device_info(device_id, self.inventory[device_id])
+            self.publish_home_assistant_discovery(device_id, self.inventory[device_id])
         self.mqtt_publish(f"devices/{device_id}/availability", "online", retain=True)
         self.mqtt_publish(
             f"devices/{device_id}/state",
@@ -191,3 +213,8 @@ class Gateway:
         if self.mqtt is None:
             return
         self.mqtt.publish(topic, payload, retain=retain)
+
+    def mqtt_publish_absolute(self, topic: str, payload: Any, retain: bool = False) -> None:
+        if self.mqtt is None:
+            return
+        self.mqtt.publish_raw(topic, payload, retain=retain)

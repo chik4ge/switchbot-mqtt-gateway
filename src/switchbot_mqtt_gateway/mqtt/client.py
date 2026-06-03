@@ -43,13 +43,16 @@ class MqttClient:
         self.client.disconnect()
 
     def publish(self, topic: str, payload: Any, retain: bool = False) -> None:
+        self.publish_raw(f"{self.settings.topic_prefix}/{topic}", payload, retain=retain)
+
+    def publish_raw(self, topic: str, payload: Any, retain: bool = False) -> None:
         if isinstance(payload, str):
             encoded = payload
         elif payload is None:
             encoded = ""
         else:
             encoded = json.dumps(payload, ensure_ascii=False, default=json_default)
-        self.client.publish(f"{self.settings.topic_prefix}/{topic}", encoded, retain=retain)
+        self.client.publish(topic, encoded, retain=retain)
 
     def _on_connect(self, client: mqtt.Client, _userdata: Any, _flags: Any, rc: Any, _props: Any) -> None:
         log("mqtt_connected", reason_code=str(rc))
