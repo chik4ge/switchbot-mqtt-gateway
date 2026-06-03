@@ -8,7 +8,9 @@ import pytest
 
 from switchbot_mqtt_gateway.gateway import Gateway
 import switchbot_mqtt_gateway.gateway.service as gateway_service
-from switchbot_mqtt_gateway.switchbot.normalize import build_normalized_state
+from switchbot_mqtt_gateway.switchbot.devices.registry import profile_for_device_type
+from switchbot_mqtt_gateway.switchbot.normalization import build_normalized_state
+from switchbot_mqtt_gateway.switchbot.parsing import parse_bool
 
 
 class FakeApi:
@@ -105,11 +107,11 @@ def test_publish_ble_state_adds_device_and_publishes_state() -> None:
     assert state_payload["pyswitchbot"]["data"]["data"]["isOn"] is True
     assert state_payload["normalized"]["is_on"] is True
     assert any(
-        topic == "homeassistant/binary_sensor/AABBCCDDEEFF/power_state/config" and retain
+        topic == "homeassistant/light/AABBCCDDEEFF/light/config" and retain
         for topic, _, retain in mqtt.published
     )
     assert any(
-        topic == "homeassistant/sensor/AABBCCDDEEFF/brightness/config" and retain
+        topic == "homeassistant/sensor/AABBCCDDEEFF/rssi/config" and retain
         for topic, _, retain in mqtt.published
     )
 
@@ -138,7 +140,7 @@ def test_resolve_device_id_from_address_or_parsed_alias() -> None:
         (
             "Plug Mini (JP)",
             [
-                "homeassistant/binary_sensor/DEVICE1/power_state/config",
+                "homeassistant/switch/DEVICE1/power_state/config",
                 "homeassistant/sensor/DEVICE1/power/config",
                 "homeassistant/sensor/DEVICE1/wifi_rssi/config",
                 "homeassistant/sensor/DEVICE1/rssi/config",
@@ -171,6 +173,7 @@ def test_home_assistant_discovery_configs_are_published(
 
 def test_build_normalized_state_maps_common_fields() -> None:
     normalized = build_normalized_state(
+        profile_for_device_type("Plug Mini (JP)"),
         {
             "rssi": -55,
             "data": {
@@ -197,6 +200,22 @@ def test_build_normalized_state_maps_common_fields() -> None:
     }
 
 
+def test_parse_bool_is_explicit() -> None:
+    assert parse_bool("true") is True
+    assert parse_bool("false") is False
+    assert parse_bool("off") is False
+    assert parse_bool("unknown") is None
+
+
+def test_build_normalized_state_does_not_treat_false_string_as_true() -> None:
+    normalized = build_normalized_state(
+        profile_for_device_type("Strip Light"),
+        {"data": {"data": {"isOn": "false"}}},
+    )
+
+    assert normalized["is_on"] is False
+
+
 def test_handle_command_executes_seen_device_command(monkeypatch: pytest.MonkeyPatch) -> None:
     gateway, mqtt = gateway_with_inventory(
         {
@@ -214,7 +233,7 @@ def test_handle_command_executes_seen_device_command(monkeypatch: pytest.MonkeyP
     class FakeDevice:
         pass
 
-    async def fake_execute(device: object, payload: dict[str, Any]) -> bool:
+    async def fake_execute(_profile: object, device: object, payload: dict[str, Any]) -> bool:
         assert isinstance(device, FakeDevice)
         assert payload["action"] == "set_power"
         return True
@@ -255,7 +274,7 @@ def test_handle_command_republishes_duplicate_request(monkeypatch: pytest.Monkey
     class FakeDevice:
         pass
 
-    async def fake_execute(_device: object, _payload: dict[str, Any]) -> bool:
+    async def fake_execute(_profile: object, _device: object, _payload: dict[str, Any]) -> bool:
         nonlocal calls
         calls += 1
         return True
@@ -295,3 +314,27 @@ def test_command_fails_for_unseen_device() -> None:
 
     assert result["status"] == "failed"
     assert result["error"] == "device_not_seen"
+
+
+def test_command_fails_for_unsupported_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    gateway, _ = gateway_with_inventory(
+        {
+            "AABBCCDDEEFF": {
+                "deviceId": "AABBCCDDEEFF",
+                "deviceName": "Light strip",
+                "deviceType": "Strip Light",
+            }
+        }
+    )
+    gateway.inventory = gateway.api.devices  # type: ignore[attr-defined]
+    gateway.ble_addresses["AABBCCDDEEFF"] = "AA:BB:CC:DD:EE:FF"
+
+    class FakeDevice:
+        pass
+
+    monkeypatch.setattr(gateway_service, "build_device", lambda *_args: FakeDevice())
+
+    result = asyncio.run(gateway.execute_device_command("AABBCCDDEEFF", {"action": "press"}))
+
+    assert result["status"] == "failed"
+    assert result["error"] == "unsupported_action"

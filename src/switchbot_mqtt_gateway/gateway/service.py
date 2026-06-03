@@ -16,8 +16,9 @@ from switchbot_mqtt_gateway.home_assistant import (
     discovery_topics_for_device,
 )
 from switchbot_mqtt_gateway.switchbot.ble import parse_switchbot_advertisement
-from switchbot_mqtt_gateway.switchbot.commands import build_device, execute_command
-from switchbot_mqtt_gateway.switchbot.normalize import build_normalized_state
+from switchbot_mqtt_gateway.switchbot.devices.registry import build_device, profile_for_device
+from switchbot_mqtt_gateway.switchbot.dispatcher import execute_command
+from switchbot_mqtt_gateway.switchbot.normalization import build_normalized_state
 from switchbot_mqtt_gateway.mqtt.client import MqttClient
 from switchbot_mqtt_gateway.settings import Settings
 from switchbot_mqtt_gateway.switchbot.openapi import SwitchBotOpenApi
@@ -97,10 +98,12 @@ class Gateway:
             return {**result, "status": "failed", "error": "device_not_seen"}
 
         device_info = self.inventory[device_id]
-        device_type = str(device_info.get("deviceType") or "")
+        profile = profile_for_device(device_info)
+        if profile is None:
+            return {**result, "status": "failed", "error": "unsupported_device_type"}
         try:
-            device = build_device(device_type, self.ble_addresses[device_id], device_info.get("deviceName"))
-            ok = await execute_command(device, payload)
+            device = build_device(profile, self.ble_addresses[device_id], device_info.get("deviceName"))
+            ok = await execute_command(profile, device, payload)
         except Exception as exc:
             return {**result, "status": "failed", "error": str(exc)}
         return {**result, "status": "succeeded" if ok is not False else "failed"}
@@ -235,7 +238,9 @@ class Gateway:
                 "observed_at": utc_now(),
                 "rssi_dbm": getattr(device, "rssi", None) if device is not None else None,
                 "normalized": build_normalized_state(
-                    parsed, getattr(device, "rssi", None) if device is not None else None
+                    profile_for_device(self.inventory[device_id]),
+                    parsed,
+                    getattr(device, "rssi", None) if device is not None else None,
                 ),
                 "pyswitchbot": parsed,
             },
