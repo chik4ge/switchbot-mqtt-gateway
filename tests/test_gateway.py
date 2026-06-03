@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from switchbot_mqtt_gateway.gateway import Gateway
+from switchbot_mqtt_gateway.switchbot.normalize import build_normalized_state
 
 
 class FakeApi:
@@ -88,7 +89,7 @@ def test_publish_ble_state_adds_device_and_publishes_state() -> None:
 
     gateway.publish_ble_state(
         "AABBCCDDEEFF",
-        {"address": "AA:BB:CC:DD:EE:FF", "data": {"isOn": True}},
+        {"address": "AA:BB:CC:DD:EE:FF", "data": {"data": {"isOn": True}}},
         device=None,
     )
 
@@ -100,7 +101,8 @@ def test_publish_ble_state_adds_device_and_publishes_state() -> None:
     assert state_topic == "devices/AABBCCDDEEFF/state"
     assert retain is False
     assert state_payload["device_id"] == "AABBCCDDEEFF"
-    assert state_payload["pyswitchbot"]["data"]["isOn"] is True
+    assert state_payload["pyswitchbot"]["data"]["data"]["isOn"] is True
+    assert state_payload["normalized"]["is_on"] is True
     assert any(
         topic == "homeassistant/binary_sensor/AABBCCDDEEFF/power_state/config" and retain
         for topic, _, retain in mqtt.published
@@ -164,3 +166,31 @@ def test_home_assistant_discovery_configs_are_published(
         topic for topic, payload, retain in mqtt.published if topic.startswith("homeassistant/") and retain and payload
     }
     assert retained_discovery_topics == set(expected_topics)
+
+
+def test_build_normalized_state_maps_common_fields() -> None:
+    normalized = build_normalized_state(
+        {
+            "rssi": -55,
+            "data": {
+                "modelFriendlyName": "Plug Mini (JP)",
+                "modelName": "WoPlug",
+                "data": {
+                    "isOn": True,
+                    "power": 19.6,
+                    "wifi_rssi": -25,
+                    "sequence_number": 7,
+                },
+            },
+        }
+    )
+
+    assert normalized == {
+        "model": "Plug Mini (JP)",
+        "model_name": "WoPlug",
+        "is_on": True,
+        "power_w": 19.6,
+        "wifi_rssi_dbm": -25,
+        "sequence_number": 7,
+        "rssi_dbm": -55,
+    }

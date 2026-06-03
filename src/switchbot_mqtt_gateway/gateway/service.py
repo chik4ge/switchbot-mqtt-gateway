@@ -16,6 +16,7 @@ from switchbot_mqtt_gateway.home_assistant import (
     discovery_topics_for_device,
 )
 from switchbot_mqtt_gateway.switchbot.ble import parse_switchbot_advertisement
+from switchbot_mqtt_gateway.switchbot.normalize import build_normalized_state
 from switchbot_mqtt_gateway.mqtt.client import MqttClient
 from switchbot_mqtt_gateway.settings import Settings
 from switchbot_mqtt_gateway.switchbot.openapi import SwitchBotOpenApi
@@ -195,6 +196,9 @@ class Gateway:
                 "device_id": device_id,
                 "observed_at": utc_now(),
                 "rssi_dbm": getattr(device, "rssi", None) if device is not None else None,
+                "normalized": build_normalized_state(
+                    parsed, getattr(device, "rssi", None) if device is not None else None
+                ),
                 "pyswitchbot": parsed,
             },
         )
