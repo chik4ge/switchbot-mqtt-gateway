@@ -60,15 +60,22 @@ class Gateway:
         return self.state.ble_devices
 
     @property
-    def command_results(self) -> dict[str, dict[str, Any]]:
+    def command_results(self) -> dict[tuple[str, str], dict[str, Any]]:
         return self.state.command_results
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        self.mqtt = MqttClient(self.settings, loop, self.reload, self.handle_command)
+        self.mqtt = MqttClient(
+            self.settings,
+            loop,
+            self.reload,
+            self.handle_command,
+            self.resync_mqtt_state,
+        )
         self.mqtt.connect()
+        await self.mqtt.wait_until_connected()
         self.publisher.publish_gateway_status()
-        await self.refresh_inventory()
+        await self.refresh_inventory_with_retry()
         scanner = BleakScanner(detection_callback=self.on_advertisement)
         await scanner.start()
         log("ble_scan_started")
@@ -80,6 +87,35 @@ class Gateway:
 
     async def reload(self, payload: Mapping[str, Any]) -> None:
         await self.inventory_service.reload(payload)
+
+    async def resync_mqtt_state(self) -> None:
+        self.inventory_service.retry_pending_retained_deletes()
+        self.publisher.publish_gateway_status()
+        self.inventory_service.publish_inventory()
+        for device_id in self.ble_devices & self.inventory.keys():
+            device = self.inventory[device_id]
+            self.publisher.publish_device_info(device_id, device)
+            self.publisher.publish_home_assistant_discovery(device_id, device)
+            last_seen = self.seen.get(device_id)
+            availability = (
+                "online"
+                if last_seen is not None
+                and time.monotonic() - last_seen
+                <= self.settings.device_offline_after_seconds
+                else "offline"
+            )
+            self.publisher.publish(
+                f"devices/{device_id}/availability",
+                availability,
+                retain=True,
+            )
+            state_payload = self.state.latest_states.get(device_id)
+            if state_payload is not None:
+                self.publisher.publish(
+                    f"devices/{device_id}/state",
+                    state_payload,
+                    retain=True,
+                )
 
     async def handle_command(self, device_id: str, payload: Mapping[str, Any]) -> None:
         await self.command_service.handle(device_id, payload)
@@ -112,6 +148,22 @@ class Gateway:
 
     async def refresh_inventory(self) -> None:
         await self.inventory_service.refresh()
+
+    async def refresh_inventory_with_retry(self) -> None:
+        delay = 1
+        while True:
+            try:
+                await self.refresh_inventory()
+                return
+            except Exception as exc:
+                log(
+                    "inventory_refresh_failed",
+                    logging.ERROR,
+                    error=str(exc),
+                    retry_in_seconds=delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 300)
 
     def publish_inventory(self) -> None:
         self.inventory_service.publish_inventory()

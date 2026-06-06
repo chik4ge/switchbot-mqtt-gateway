@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -25,7 +26,20 @@ class InventoryService:
 
     async def reload(self, payload: Mapping[str, Any]) -> None:
         before = dict(self.state.inventory)
-        await self.refresh()
+        try:
+            await self.refresh()
+        except Exception as exc:
+            log("inventory_reload_failed", logging.ERROR, error=str(exc))
+            self.publisher.publish(
+                "gateway/events/reload_result",
+                {
+                    "request_id": payload.get("request_id"),
+                    "status": "failed",
+                    "error": "inventory refresh failed",
+                    "completed_at": utc_now(),
+                },
+            )
+            return
         added = self.state.inventory.keys() - before.keys()
         removed = before.keys() - self.state.inventory.keys()
         updated = {
@@ -50,8 +64,8 @@ class InventoryService:
         devices = await self.api.fetch_devices()
         before = self.state.inventory
         removed = before.keys() - devices.keys()
+        removed_ble_devices = removed & self.state.ble_devices
         self.state.inventory = devices
-        self.publish_inventory()
         for device_id, device in devices.items():
             if device_id in self.state.ble_devices:
                 self.publisher.publish_device_info(device_id, device)
@@ -59,11 +73,28 @@ class InventoryService:
             else:
                 self.publisher.clear_retained_device_topics(device_id)
                 self.publisher.clear_home_assistant_discovery(device_id, device)
-        for device_id in removed & self.state.ble_devices:
+        for device_id in removed_ble_devices:
             self.publisher.publish(f"devices/{device_id}/availability", "offline", retain=True)
-            self.publisher.clear_retained_device_topics(device_id)
-            self.publisher.clear_home_assistant_discovery(device_id, before[device_id])
+            device = before[device_id]
+            retained_cleared = self.publisher.clear_retained_device_topics(device_id)
+            discovery_cleared = self.publisher.clear_home_assistant_discovery(device_id, device)
+            if not retained_cleared or not discovery_cleared:
+                self.state.pending_retained_deletes[device_id] = device
+        for device_id in removed:
+            self.state.ble_devices.discard(device_id)
+            self.state.ble_addresses.pop(device_id, None)
+            self.state.seen.pop(device_id, None)
+            self.state.normalized_states.pop(device_id, None)
+            self.state.latest_states.pop(device_id, None)
+        self.publish_inventory()
         log("inventory_refreshed", devices_total=len(devices), devices_removed=len(removed))
+
+    def retry_pending_retained_deletes(self) -> None:
+        for device_id, device in list(self.state.pending_retained_deletes.items()):
+            retained_cleared = self.publisher.clear_retained_device_topics(device_id)
+            discovery_cleared = self.publisher.clear_home_assistant_discovery(device_id, device)
+            if retained_cleared and discovery_cleared:
+                self.state.pending_retained_deletes.pop(device_id, None)
 
     def publish_inventory(self) -> None:
         visible_devices = self.state.ble_devices & self.state.inventory.keys()
@@ -87,4 +118,3 @@ class InventoryService:
             },
             retain=True,
         )
-

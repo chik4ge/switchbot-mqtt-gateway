@@ -56,20 +56,21 @@ class BleService:
             self.publisher.publish_home_assistant_discovery(device_id, device_info)
         self.publisher.publish(f"devices/{device_id}/availability", "online", retain=True)
         rssi_dbm = getattr(device, "rssi", None) if device is not None else None
-        self.publisher.publish(
-            f"devices/{device_id}/state",
-            {
-                "device_id": device_id,
-                "observed_at": utc_now(),
-                "rssi_dbm": rssi_dbm,
-                "normalized": build_normalized_state(
-                    profile_for_device(device_info),
-                    parsed,
-                    rssi_dbm,
-                ),
-                "pyswitchbot": parsed,
-            },
+        normalized = build_normalized_state(
+            profile_for_device(device_info),
+            parsed,
+            rssi_dbm,
         )
+        self.state.normalized_states[device_id] = normalized
+        state_payload = {
+            "device_id": device_id,
+            "observed_at": utc_now(),
+            "rssi_dbm": rssi_dbm,
+            "normalized": normalized,
+            "pyswitchbot": parsed,
+        }
+        self.state.latest_states[device_id] = state_payload
+        self.publisher.publish(f"devices/{device_id}/state", state_payload, retain=True)
         log("ble_device_seen", device_id=device_id)
 
     def resolve_device_id(self, address: str, parsed: Mapping[str, Any]) -> str | None:
@@ -80,4 +81,3 @@ class BleService:
             if isinstance(value, str) and value.replace(":", "").upper() in self.state.inventory:
                 return value.replace(":", "").upper()
         return None
-

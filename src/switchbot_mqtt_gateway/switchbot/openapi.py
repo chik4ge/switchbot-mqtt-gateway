@@ -34,7 +34,16 @@ class SwitchBotOpenApi:
             async with session.get(f"{SWITCHBOT_API_BASE_URL}/devices", timeout=30) as response:
                 response.raise_for_status()
                 payload = await response.json()
+        return self._devices_from_payload(payload)
+
+    @staticmethod
+    def _devices_from_payload(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        status_code = payload.get("statusCode")
+        if status_code != 100:
+            message = str(payload.get("message") or "unknown error")
+            raise RuntimeError(
+                f"SwitchBot API request failed: statusCode={status_code}, message={message}"
+            )
         body = payload.get("body") or {}
         devices = [*body.get("deviceList", []), *body.get("infraredRemoteList", [])]
         return {device["deviceId"].upper(): device for device in devices if device.get("deviceId")}
-

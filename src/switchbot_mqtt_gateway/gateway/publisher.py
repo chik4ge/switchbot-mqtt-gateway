@@ -17,19 +17,26 @@ class GatewayPublisher:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.mqtt: MqttClient | None = None
+        self.started_at = utc_now()
 
-    def publish(self, topic: str, payload: Any, retain: bool = False) -> None:
-        if self.mqtt is not None:
-            self.mqtt.publish(topic, payload, retain=retain)
+    def publish(self, topic: str, payload: Any, retain: bool = False) -> bool:
+        if self.mqtt is None:
+            return False
+        return self._publish_succeeded(self.mqtt.publish(topic, payload, retain=retain))
 
-    def publish_absolute(self, topic: str, payload: Any, retain: bool = False) -> None:
-        if self.mqtt is not None:
-            self.mqtt.publish_raw(topic, payload, retain=retain)
+    def publish_absolute(self, topic: str, payload: Any, retain: bool = False) -> bool:
+        if self.mqtt is None:
+            return False
+        return self._publish_succeeded(self.mqtt.publish_raw(topic, payload, retain=retain))
+
+    @staticmethod
+    def _publish_succeeded(result: Any) -> bool:
+        return result is None or getattr(result, "rc", None) == 0
 
     def publish_gateway_status(self) -> None:
         self.publish(
             "gateway/status",
-            {"status": "online", "started_at": utc_now(), "version": __version__},
+            {"status": "online", "started_at": self.started_at, "version": __version__},
             retain=True,
         )
         self.publish(
@@ -51,9 +58,13 @@ class GatewayPublisher:
             retain=True,
         )
 
-    def clear_retained_device_topics(self, device_id: str) -> None:
-        self.publish(f"devices/{device_id}/info", None, retain=True)
-        self.publish(f"devices/{device_id}/availability", None, retain=True)
+    def clear_retained_device_topics(self, device_id: str) -> bool:
+        results = [
+            self.publish(f"devices/{device_id}/info", None, retain=True),
+            self.publish(f"devices/{device_id}/availability", None, retain=True),
+            self.publish(f"devices/{device_id}/state", None, retain=True),
+        ]
+        return all(results)
 
     def publish_home_assistant_discovery(
         self, device_id: str, device: Mapping[str, Any]
@@ -68,9 +79,11 @@ class GatewayPublisher:
 
     def clear_home_assistant_discovery(
         self, device_id: str, device: Mapping[str, Any]
-    ) -> None:
-        for topic in discovery_topics_for_device(
-            self.settings.discovery_prefix, device_id, device
-        ):
+    ) -> bool:
+        results = [
             self.publish_absolute(topic, None, retain=True)
-
+            for topic in discovery_topics_for_device(
+            self.settings.discovery_prefix, device_id, device
+            )
+        ]
+        return all(results)

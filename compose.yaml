@@ -3,8 +3,8 @@ services:
     image: eclipse-mosquitto:2
     command: mosquitto -c /mosquitto/config/mosquitto.conf
     ports:
-      - "1883:1883"
-      - "9001:9001"
+      - "127.0.0.1:1883:1883"
+      - "127.0.0.1:9001:9001"
     volumes:
       - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
 
@@ -13,7 +13,7 @@ services:
     depends_on:
       - mqtt
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     volumes:
       - ./docker/mqtt-debug-web:/usr/share/nginx/html:ro
 

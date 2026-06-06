@@ -16,8 +16,6 @@ SWITCHBOT_API_TOKEN
 SWITCHBOT_API_SECRET
 MQTT_HOST
 MQTT_PORT
-MQTT_USERNAME
-MQTT_PASSWORD
 ```
 
 Optional environment variables:
@@ -25,6 +23,8 @@ Optional environment variables:
 ```text
 MQTT_TLS_ENABLED=false
 MQTT_CA_CERT_PATH=
+MQTT_USERNAME=
+MQTT_PASSWORD=
 MQTT_CLIENT_ID=switchbot-mqtt-gateway
 MQTT_KEEPALIVE_SECONDS=60
 MQTT_TOPIC_PREFIX=switchbot

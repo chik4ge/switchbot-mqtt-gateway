@@ -1,4 +1,6 @@
 .git
+.env
+fnox.local.toml
 .venv
 __pycache__
 .pytest_cache
