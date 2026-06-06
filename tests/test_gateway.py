@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from switchbot_mqtt_gateway.gateway import Gateway
-import switchbot_mqtt_gateway.gateway.service as gateway_service
+import switchbot_mqtt_gateway.gateway.commands as gateway_commands
 from switchbot_mqtt_gateway.switchbot.devices.registry import profile_for_device_type
 from switchbot_mqtt_gateway.switchbot.normalization import build_normalized_state
 from switchbot_mqtt_gateway.switchbot.parsing import parse_bool
@@ -238,8 +238,8 @@ def test_handle_command_executes_seen_device_command(monkeypatch: pytest.MonkeyP
         assert payload["action"] == "set_power"
         return True
 
-    monkeypatch.setattr(gateway_service, "build_device", lambda *_args: FakeDevice())
-    monkeypatch.setattr(gateway_service, "execute_command", fake_execute)
+    monkeypatch.setattr(gateway_commands, "build_device", lambda *_args: FakeDevice())
+    monkeypatch.setattr(gateway_commands, "execute_command", fake_execute)
 
     asyncio.run(
         gateway.handle_command(
@@ -279,8 +279,8 @@ def test_handle_command_republishes_duplicate_request(monkeypatch: pytest.Monkey
         calls += 1
         return True
 
-    monkeypatch.setattr(gateway_service, "build_device", lambda *_args: FakeDevice())
-    monkeypatch.setattr(gateway_service, "execute_command", fake_execute)
+    monkeypatch.setattr(gateway_commands, "build_device", lambda *_args: FakeDevice())
+    monkeypatch.setattr(gateway_commands, "execute_command", fake_execute)
 
     command = {"request_id": "request-1", "action": "set_power", "value": "on"}
     asyncio.run(gateway.handle_command("AABBCCDDEEFF", command))
@@ -332,7 +332,7 @@ def test_command_fails_for_unsupported_action(monkeypatch: pytest.MonkeyPatch) -
     class FakeDevice:
         pass
 
-    monkeypatch.setattr(gateway_service, "build_device", lambda *_args: FakeDevice())
+    monkeypatch.setattr(gateway_commands, "build_device", lambda *_args: FakeDevice())
 
     result = asyncio.run(gateway.execute_device_command("AABBCCDDEEFF", {"action": "press"}))
 

@@ -10,37 +10,64 @@ from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-from switchbot_mqtt_gateway import __version__
-from switchbot_mqtt_gateway.home_assistant import (
-    build_discovery_configs,
-    discovery_topics_for_device,
-)
-from switchbot_mqtt_gateway.switchbot.ble import parse_switchbot_advertisement
-from switchbot_mqtt_gateway.switchbot.devices.registry import build_device, profile_for_device
-from switchbot_mqtt_gateway.switchbot.dispatcher import execute_command
-from switchbot_mqtt_gateway.switchbot.normalization import build_normalized_state
+from switchbot_mqtt_gateway.gateway.ble import BleService
+from switchbot_mqtt_gateway.gateway.commands import CommandService
+from switchbot_mqtt_gateway.gateway.inventory import InventoryService
+from switchbot_mqtt_gateway.gateway.publisher import GatewayPublisher
+from switchbot_mqtt_gateway.gateway.state import GatewayState
 from switchbot_mqtt_gateway.mqtt.client import MqttClient
 from switchbot_mqtt_gateway.settings import Settings
 from switchbot_mqtt_gateway.switchbot.openapi import SwitchBotOpenApi
-from switchbot_mqtt_gateway.utils import log, utc_now
+from switchbot_mqtt_gateway.utils import log
 
 
 class Gateway:
     def __init__(self, settings: Settings, api: SwitchBotOpenApi | None = None) -> None:
         self.settings = settings
         self.api = api or SwitchBotOpenApi(settings)
-        self.inventory: dict[str, dict[str, Any]] = {}
-        self.seen: dict[str, float] = {}
-        self.ble_addresses: dict[str, str] = {}
-        self.ble_devices: set[str] = set()
-        self.command_results: dict[str, dict[str, Any]] = {}
-        self.mqtt: MqttClient | None = None
+        self.state = GatewayState()
+        self.publisher = GatewayPublisher(settings)
+        self.inventory_service = InventoryService(self.api, self.state, self.publisher)
+        self.command_service = CommandService(self.state, self.publisher)
+        self.ble_service = BleService(self.state, self.publisher, self.inventory_service)
+
+    @property
+    def mqtt(self) -> MqttClient | None:
+        return self.publisher.mqtt
+
+    @mqtt.setter
+    def mqtt(self, value: MqttClient | None) -> None:
+        self.publisher.mqtt = value
+
+    @property
+    def inventory(self) -> dict[str, dict[str, Any]]:
+        return self.state.inventory
+
+    @inventory.setter
+    def inventory(self, value: dict[str, dict[str, Any]]) -> None:
+        self.state.inventory = value
+
+    @property
+    def seen(self) -> dict[str, float]:
+        return self.state.seen
+
+    @property
+    def ble_addresses(self) -> dict[str, str]:
+        return self.state.ble_addresses
+
+    @property
+    def ble_devices(self) -> set[str]:
+        return self.state.ble_devices
+
+    @property
+    def command_results(self) -> dict[str, dict[str, Any]]:
+        return self.state.command_results
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         self.mqtt = MqttClient(self.settings, loop, self.reload, self.handle_command)
         self.mqtt.connect()
-        self.publish_gateway_status()
+        self.publisher.publish_gateway_status()
         await self.refresh_inventory()
         scanner = BleakScanner(detection_callback=self.on_advertisement)
         await scanner.start()
@@ -52,61 +79,15 @@ class Gateway:
             self.mqtt.stop()
 
     async def reload(self, payload: Mapping[str, Any]) -> None:
-        before = dict(self.inventory)
-        await self.refresh_inventory()
-        added = self.inventory.keys() - before.keys()
-        removed = before.keys() - self.inventory.keys()
-        updated = {
-            device_id
-            for device_id in self.inventory.keys() & before.keys()
-            if self.inventory[device_id] != before[device_id]
-        }
-        self.mqtt_publish(
-            "gateway/events/reload_result",
-            {
-                "request_id": payload.get("request_id"),
-                "status": "succeeded",
-                "devices_total": len(self.inventory),
-                "devices_added": len(added),
-                "devices_updated": len(updated),
-                "devices_removed": len(removed),
-                "completed_at": utc_now(),
-            },
-        )
+        await self.inventory_service.reload(payload)
 
     async def handle_command(self, device_id: str, payload: Mapping[str, Any]) -> None:
-        request_id = str(payload.get("request_id") or "")
-        if request_id and request_id in self.command_results:
-            self.mqtt_publish(f"devices/{device_id}/events/command_result", self.command_results[request_id])
-            return
+        await self.command_service.handle(device_id, payload)
 
-        result = await self.execute_device_command(device_id, payload)
-        if request_id:
-            self.command_results[request_id] = result
-        self.mqtt_publish(f"devices/{device_id}/events/command_result", result)
-
-    async def execute_device_command(self, device_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        action = str(payload.get("action") or "")
-        result: dict[str, Any] = {
-            "request_id": payload.get("request_id"),
-            "action": action,
-            "completed_at": utc_now(),
-        }
-        if device_id not in self.inventory:
-            return {**result, "status": "failed", "error": "device_not_found"}
-        if device_id not in self.ble_addresses:
-            return {**result, "status": "failed", "error": "device_not_seen"}
-
-        device_info = self.inventory[device_id]
-        profile = profile_for_device(device_info)
-        if profile is None:
-            return {**result, "status": "failed", "error": "unsupported_device_type"}
-        try:
-            device = build_device(profile, self.ble_addresses[device_id], device_info.get("deviceName"))
-            ok = await execute_command(profile, device, payload)
-        except Exception as exc:
-            return {**result, "status": "failed", "error": str(exc)}
-        return {**result, "status": "succeeded" if ok is not False else "failed"}
+    async def execute_device_command(
+        self, device_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return await self.command_service.execute(device_id, payload)
 
     async def periodic_inventory_refresh(self) -> None:
         while True:
@@ -123,145 +104,53 @@ class Gateway:
             for device_id in self.ble_devices:
                 last_seen = self.seen.get(device_id)
                 if last_seen is None or now - last_seen > self.settings.device_offline_after_seconds:
-                    self.mqtt_publish(f"devices/{device_id}/availability", "offline", retain=True)
+                    self.publisher.publish(
+                        f"devices/{device_id}/availability",
+                        "offline",
+                        retain=True,
+                    )
 
     async def refresh_inventory(self) -> None:
-        devices = await self.api.fetch_devices()
-        before = self.inventory
-        removed = before.keys() - devices.keys()
-        self.inventory = devices
-        self.publish_inventory()
-        for device_id, device in devices.items():
-            if device_id in self.ble_devices:
-                self.publish_device_info(device_id, device)
-                self.publish_home_assistant_discovery(device_id, device)
-            else:
-                self.clear_retained_device_topics(device_id)
-                self.clear_home_assistant_discovery(device_id, device)
-        for device_id in removed & self.ble_devices:
-            self.mqtt_publish(f"devices/{device_id}/availability", "offline", retain=True)
-            self.clear_retained_device_topics(device_id)
-            self.clear_home_assistant_discovery(device_id, before[device_id])
-        log("inventory_refreshed", devices_total=len(devices), devices_removed=len(removed))
-
-    def publish_gateway_status(self) -> None:
-        self.mqtt_publish(
-            "gateway/status",
-            {"status": "online", "started_at": utc_now(), "version": __version__},
-            retain=True,
-        )
-        self.mqtt_publish(
-            "gateway/info",
-            {"version": __version__, "schema": "pyswitchbot-advertisement-pass-through"},
-            retain=True,
-        )
+        await self.inventory_service.refresh()
 
     def publish_inventory(self) -> None:
-        visible_devices = self.ble_devices & self.inventory.keys()
-        self.mqtt_publish(
-            "gateway/inventory",
-            {
-                "refreshed_at": utc_now(),
-                "devices_total": len(self.inventory),
-                "ble_devices_total": len(self.ble_devices),
-                "published_devices_total": len(visible_devices),
-                "devices": [
-                    {
-                        "device_id": device_id,
-                        "name": device.get("deviceName"),
-                        "type": device.get("deviceType"),
-                        "ble_seen": device_id in self.seen,
-                    }
-                    for device_id, device in self.inventory.items()
-                    if device_id in visible_devices
-                ],
-            },
-            retain=True,
-        )
+        self.inventory_service.publish_inventory()
+
+    def publish_gateway_status(self) -> None:
+        self.publisher.publish_gateway_status()
 
     def publish_device_info(self, device_id: str, device: Mapping[str, Any]) -> None:
-        self.mqtt_publish(
-            f"devices/{device_id}/info",
-            {
-                "device_id": device_id,
-                "name": device.get("deviceName"),
-                "type": device.get("deviceType"),
-                "cloud_service_enabled": device.get("enableCloudService"),
-                "raw": device,
-            },
-            retain=True,
-        )
+        self.publisher.publish_device_info(device_id, device)
 
     def clear_retained_device_topics(self, device_id: str) -> None:
-        self.mqtt_publish(f"devices/{device_id}/info", None, retain=True)
-        self.mqtt_publish(f"devices/{device_id}/availability", None, retain=True)
+        self.publisher.clear_retained_device_topics(device_id)
 
-    def publish_home_assistant_discovery(self, device_id: str, device: Mapping[str, Any]) -> None:
-        for topic, payload in build_discovery_configs(
-            self.settings.topic_prefix,
-            self.settings.discovery_prefix,
-            device_id,
-            device,
-        ):
-            self.mqtt_publish_absolute(topic, payload, retain=True)
+    def publish_home_assistant_discovery(
+        self, device_id: str, device: Mapping[str, Any]
+    ) -> None:
+        self.publisher.publish_home_assistant_discovery(device_id, device)
 
-    def clear_home_assistant_discovery(self, device_id: str, device: Mapping[str, Any]) -> None:
-        for topic in discovery_topics_for_device(self.settings.discovery_prefix, device_id, device):
-            self.mqtt_publish_absolute(topic, None, retain=True)
+    def clear_home_assistant_discovery(
+        self, device_id: str, device: Mapping[str, Any]
+    ) -> None:
+        self.publisher.clear_home_assistant_discovery(device_id, device)
 
     def on_advertisement(self, device: BLEDevice, advertisement: AdvertisementData) -> None:
-        parsed = parse_switchbot_advertisement(device, advertisement)
-        if not parsed:
-            return
-        address = getattr(device, "address", "").replace(":", "").upper()
-        device_id = self.resolve_device_id(address, parsed)
-        if not device_id or device_id not in self.inventory:
-            return
-        self.publish_ble_state(device_id, parsed, device)
+        self.ble_service.on_advertisement(device, advertisement)
 
-    def publish_ble_state(self, device_id: str, parsed: Mapping[str, Any], device: BLEDevice | None) -> None:
-        is_new_ble_device = device_id not in self.ble_devices
-        self.ble_devices.add(device_id)
-        address = parsed.get("address")
-        if isinstance(address, str):
-            self.ble_addresses[device_id] = address
-        self.seen[device_id] = time.monotonic()
-        if is_new_ble_device:
-            self.publish_inventory()
-            self.publish_device_info(device_id, self.inventory[device_id])
-            self.publish_home_assistant_discovery(device_id, self.inventory[device_id])
-        self.mqtt_publish(f"devices/{device_id}/availability", "online", retain=True)
-        self.mqtt_publish(
-            f"devices/{device_id}/state",
-            {
-                "device_id": device_id,
-                "observed_at": utc_now(),
-                "rssi_dbm": getattr(device, "rssi", None) if device is not None else None,
-                "normalized": build_normalized_state(
-                    profile_for_device(self.inventory[device_id]),
-                    parsed,
-                    getattr(device, "rssi", None) if device is not None else None,
-                ),
-                "pyswitchbot": parsed,
-            },
-        )
-        log("ble_device_seen", device_id=device_id)
+    def publish_ble_state(
+        self,
+        device_id: str,
+        parsed: Mapping[str, Any],
+        device: BLEDevice | None,
+    ) -> None:
+        self.ble_service.publish_state(device_id, parsed, device)
 
     def resolve_device_id(self, address: str, parsed: Mapping[str, Any]) -> str | None:
-        if address in self.inventory:
-            return address
-        for key in ("address", "device_id", "deviceId", "mac", "mac_address"):
-            value = parsed.get(key)
-            if isinstance(value, str) and value.replace(":", "").upper() in self.inventory:
-                return value.replace(":", "").upper()
-        return None
+        return self.ble_service.resolve_device_id(address, parsed)
 
     def mqtt_publish(self, topic: str, payload: Any, retain: bool = False) -> None:
-        if self.mqtt is None:
-            return
-        self.mqtt.publish(topic, payload, retain=retain)
+        self.publisher.publish(topic, payload, retain)
 
     def mqtt_publish_absolute(self, topic: str, payload: Any, retain: bool = False) -> None:
-        if self.mqtt is None:
-            return
-        self.mqtt.publish_raw(topic, payload, retain=retain)
+        self.publisher.publish_absolute(topic, payload, retain)
