@@ -18,7 +18,7 @@ services:
       - ./docker/mqtt-debug-web:/usr/share/nginx/html:ro
 
   gateway:
-    build: .
+    image: ghcr.io/chik4ge/switchbot-mqtt-gateway:latest
     network_mode: host
     depends_on:
       - mqtt

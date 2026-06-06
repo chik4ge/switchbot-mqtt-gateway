@@ -77,7 +77,7 @@ class MqttClient:
         return self.client.publish(topic, encoded, retain=retain)
 
     def _on_connect(self, client: mqtt.Client, _userdata: Any, _flags: Any, rc: Any, _props: Any) -> None:
-        if int(rc) != 0:
+        if getattr(rc, "is_failure", False):
             log("mqtt_connect_failed", logging.ERROR, reason_code=str(rc))
             return
         log("mqtt_connected", reason_code=str(rc))
